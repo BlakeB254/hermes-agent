@@ -1713,6 +1713,14 @@ def run_kanban_goal_loop(
     # The first turn already consumed one unit of budget.
     turns_used = 1
     nudged_to_finalize = False
+    # Mirrors the guard GoalManager already applies to the INTERACTIVE loop
+    # (see DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES there). The kanban loop
+    # never had it, so an unreachable judge never returned "done", the loop
+    # spent every remaining turn re-asking a dead API, and the card was then
+    # blocked with "exhausted its turn budget (N/N)" -- a message describing
+    # the symptom while hiding the cause. Observed 2026-08-06: judge failed
+    # with PermissionDeniedError on every turn of a 40-turn budget.
+    consecutive_transport_failures = 0
 
     while True:
         # Did the worker terminate the task itself this turn?
@@ -1738,9 +1746,34 @@ def run_kanban_goal_loop(
         # via kanban_complete / kanban_block, not by parking), so a WAIT
         # verdict is treated as CONTINUE here.
         verdict, reason, _parse_failed, _wait, _transport_failed = judge_goal(goal_text, last_response)
+        if _transport_failed:
+            consecutive_transport_failures += 1
+        else:
+            consecutive_transport_failures = 0
         if verdict == "wait":
             verdict = "continue"
         _log(f"kanban goal loop: turn {turns_used}/{max_turns} verdict={verdict} reason={_truncate(reason, 120)}")
+
+        # The judge is unreachable, so no number of further turns can produce a
+        # "done" verdict. Stop WITHOUT blocking: an unreachable judge is an
+        # infrastructure fault, not a bad card, and the dispatcher can retry
+        # the task once the provider recovers. Blocking here is what turned a
+        # provider outage into a pile of sticky "exhausted its turn budget"
+        # cards that each needed a human to clear.
+        if consecutive_transport_failures >= DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES:
+            _log(
+                f"kanban goal loop: judge unreachable "
+                f"{consecutive_transport_failures} turns in a row; stopping "
+                f"(task left for the dispatcher to retry)"
+            )
+            return {
+                "outcome": "stopped",
+                "turns_used": turns_used,
+                "reason": (
+                    f"goal judge unreachable {consecutive_transport_failures} "
+                    f"turns in a row (auxiliary.goal_judge provider/key)"
+                ),
+            }
 
         if verdict == "done":
             if nudged_to_finalize:

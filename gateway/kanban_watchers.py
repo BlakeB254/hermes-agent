@@ -25,6 +25,36 @@ from agent.i18n import t
 logger = logging.getLogger("gateway.run")
 
 
+def _gave_up_cause(payload: Optional[dict]) -> str:
+    """Describe why the retry breaker tripped, in the operator's words.
+
+    ``gave_up`` is emitted by ONE breaker shared by the spawn-failure,
+    timeout, crash and clean-exit-protocol-violation paths, but the
+    notification used to hardcode "gave up after repeated spawn failures"
+    for all of them. During the 2026-08-06 provider outage that was wrong
+    for 305 of 308 events -- only 3 were genuine spawn failures, while 277
+    were workers exiting rc=0 without calling ``kanban_complete`` because
+    they could not reach a model at all. Operators chased a spawn bug that
+    did not exist. The trigger is already in the payload; report it.
+    """
+    payload = payload or {}
+    trigger = str(payload.get("trigger_outcome") or "")
+    if payload.get("protocol_violations"):
+        return (
+            "gave up — the worker kept exiting cleanly without calling "
+            "kanban_complete/kanban_block (usually it could not reach a model)"
+        )
+    if trigger == "timed_out":
+        return "gave up after repeated timeouts"
+    if trigger == "crashed":
+        return "gave up after repeated worker crashes"
+    if trigger == "spawn_failed":
+        return "gave up after repeated spawn failures"
+    if trigger:
+        return f"gave up after repeated failures ({trigger})"
+    return "gave up after repeated failures"
+
+
 def _resolve_auto_decompose_settings(
     load_config: Callable[[], Any],
 ) -> "tuple[bool, int]":
@@ -442,8 +472,8 @@ class GatewayKanbanWatchersMixin:
                             if ev.payload and ev.payload.get("error"):
                                 err = f"\n{str(ev.payload['error'])[:200]}"
                             msg = (
-                                f"✖ {board_tag}{tag}Kanban {sub['task_id']} gave up "
-                                f"after repeated spawn failures{err}"
+                                f"✖ {board_tag}{tag}Kanban {sub['task_id']} "
+                                f"{_gave_up_cause(ev.payload)}{err}"
                             )
                         elif kind == "crashed":
                             msg = (
