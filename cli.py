@@ -13922,6 +13922,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                         "error": _summary,
                     }
                 finally:
+                    # Expose the turn's raw result so non-quiet single-query
+                    # callers can set a truthful exit code. `chat()` returns
+                    # only the response string, so `hermes chat -q` had no way
+                    # to know the turn failed and always exited 0 -- see the
+                    # exit-code block in the `-q` branch of main().
+                    self._last_run_result = result
                     if _one_turn_model_restore:
                         self._restore_model_runtime_snapshot(_one_turn_model_restore)
                     # Surface any credit notices queued during the turn (cold-start
@@ -18395,6 +18401,34 @@ def main(
                 cli._print_exit_summary(clear_screen=False)
         finally:
             _finalize_single_query(cli)
+        # Mirror the exit-code contract the fully-quiet (-Q) branch already
+        # honours. Without this, `hermes chat -q` exited 0 even when it could
+        # not reach ANY provider, and the kanban dispatcher only sees the exit
+        # code: a clean 0 with no terminal tool call is scored as a WORKER
+        # protocol violation, which burns the task's retries and eventually
+        # trips the breaker ("gave up after repeated spawn failures").
+        #
+        # The dispatcher spawns non-goal-mode workers as `chat -q` and only
+        # appends -Q for goal_mode, so the majority of workers took this path.
+        # During the 2026-08-06 provider outage that produced 277 phantom
+        # protocol violations and destroyed 81 tasks that were never at fault.
+        #
+        # rate_limit / billing still map to EX_TEMPFAIL (75) so the dispatcher
+        # requeues WITHOUT counting a failure -- a quota wall is not a bad card.
+        _sq_result = getattr(cli, "_last_run_result", None)
+        if isinstance(_sq_result, dict) and _sq_result.get("failed"):
+            _sq_exit = 1
+            if os.environ.get("HERMES_KANBAN_TASK") and _sq_result.get(
+                "failure_reason"
+            ) in ("rate_limit", "billing"):
+                try:
+                    from hermes_cli.kanban_db import (
+                        KANBAN_RATE_LIMIT_EXIT_CODE as _RL_CODE,
+                    )
+                    _sq_exit = _RL_CODE
+                except Exception:
+                    _sq_exit = 1
+            sys.exit(_sq_exit)
         return
     
     # Run interactive mode
