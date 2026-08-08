@@ -150,6 +150,7 @@ _EXTRA_KEYS = frozenset({
     "token_type", "scope", "client_id", "portal_base_url", "obtained_at",
     "expires_in", "agent_key_id", "agent_key_expires_in", "agent_key_reused",
     "agent_key_obtained_at", "tls", "secret_source", "secret_fingerprint",
+    "status_cleared_at",
 })
 
 
@@ -2078,6 +2079,7 @@ class CredentialPool:
         with self._lock:
             count = 0
             new_entries = []
+            cleared_at = time.time()
             for entry in self._entries:
                 if entry.last_status or entry.last_status_at or entry.last_error_code:
                     new_entries.append(
@@ -2089,6 +2091,7 @@ class CredentialPool:
                             last_error_reason=None,
                             last_error_message=None,
                             last_error_reset_at=None,
+                            extra={**entry.extra, "status_cleared_at": cleared_at},
                         )
                     )
                     count += 1
