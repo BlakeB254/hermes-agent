@@ -1,6 +1,10 @@
 name: xai
-version: 1.0.0
-description: "xAI image generation backend (grok-imagine-image). Text-to-image."
+version: 1.1.0
+description: >
+  xAI Grok Imagine image backend (grok-imagine-image + quality). Text-to-image and
+  multi-image edit (≤3 sources). Imagine Image 2.0 consumer tools are GA on grok.com;
+  API access still "coming soon" per https://x.ai/news/grok-imagine-image-2 — do not
+  expose wand/segment/5-ref until docs.x.ai ships them.
 author: Julien Talbot
 kind: backend
 requires_env:
