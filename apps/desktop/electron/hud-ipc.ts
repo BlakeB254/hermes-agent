@@ -107,6 +107,12 @@ export function registerHudIpc({
     const hudWindow = getHudWindow()
 
     if (hudWindow && !hudWindow.isDestroyed()) {
+      // CDX local: ignore-mouse is a one-way door on this X11/Electron stack —
+      // setIgnoreMouseEvents(false) cannot restore the input region. Veto
+      // ignore requests on Linux so the HUD stays a solid clickable window.
+      if (process.platform === 'linux' && Boolean(ignore)) {
+        return
+      }
       hudWindow.setIgnoreMouseEvents(Boolean(ignore), { forward: true })
     }
   })
