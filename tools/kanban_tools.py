@@ -34,7 +34,7 @@ import os
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
-from hermes_cli.goals import judge_goal
+from hermes_cli.goals import evaluate_goal_completion_gate
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 
@@ -727,31 +727,17 @@ def _handle_complete(args: dict, **kw) -> str:
             # Goal-mode pre-completion judge gate (Issue #38367).
             # Prevent workers from bypassing the auxiliary judge by
             # calling kanban_complete before acceptance criteria are met.
-            # Only enforce when a judge is actually reachable — see
-            # _goal_judge_available for why an unavailable judge fails open.
+            # Fail-open when the judge is unconfigured or degraded
+            # (transport_failed / parse_failed) — a configured-but-500
+            # auxiliary (InternalServerError, GeminiAPIError) must not
+            # wedge every goal_mode worker.
             task = kb.get_task(conn, tid)
-            if task and task.goal_mode and _goal_judge_available():
-                verdict = "done"
-                reason = ""
-                try:
-                    # judge_goal returns (verdict, reason, parse_failed,
-                    # wait_directive, transport_failed) — see
-                    # hermes_cli/goals.py. Unpacking fewer raises ValueError,
-                    # which the defensive handler below swallows, leaving
-                    # verdict="done" and silently disabling the gate.
-                    verdict, reason, _, _, _ = judge_goal(
-                        goal=f"{task.title}\n\n{task.body or ''}".strip(),
-                        last_response=(summary or result or "").strip(),
-                    )
-                except Exception as judge_exc:
-                    # Defensive: judge_goal swallows its own errors, but if
-                    # it ever raises, fail open rather than wedge the worker.
-                    logger.warning(
-                        "goal judge check failed, allowing completion: %s",
-                        judge_exc,
-                        exc_info=True,
-                    )
-                if verdict != "done":
+            if task and task.goal_mode:
+                allowed, reason = evaluate_goal_completion_gate(
+                    goal=f"{task.title}\n\n{task.body or ''}".strip(),
+                    last_response=(summary or result or "").strip(),
+                )
+                if not allowed:
                     return tool_error(
                         f"Goal completion rejected by judge: {reason}. "
                         f"To proceed, either: (1) provide explicit acceptance "
