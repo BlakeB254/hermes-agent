@@ -1302,6 +1302,59 @@ def judge_goal(
     return verdict, reason, parse_failed, wait_directive, False
 
 
+def evaluate_goal_completion_gate(
+    goal: str,
+    last_response: str,
+    *,
+    timeout: float = DEFAULT_JUDGE_TIMEOUT,
+) -> Tuple[bool, str]:
+    """Decide whether a goal_mode ``kanban_complete`` should proceed.
+
+    Returns ``(allowed, reason)``. Real ``continue`` / ``wait`` verdicts
+    still block completion. Transport errors (``InternalServerError``,
+    auth/timeout/DNS) and unparseable judge replies fail **open** so a
+    degraded auxiliary model cannot wedge every goal_mode worker.
+
+    This is the contract the kanban tool and ``hermes kanban complete``
+    must share — the earlier complete-gate only checked that a client
+    was *configured*, then treated ``judge error: InternalServerError``
+    as a content rejection.
+    """
+    try:
+        from agent.auxiliary_client import get_text_auxiliary_client
+
+        client, model = get_text_auxiliary_client("goal_judge")
+        if client is None or not model:
+            return True, "goal judge unavailable"
+    except Exception:
+        return True, "goal judge unavailable"
+
+    try:
+        verdict, reason, parse_failed, _wait, transport_failed = judge_goal(
+            goal=goal,
+            last_response=last_response,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        logger.warning(
+            "goal judge check failed, allowing completion: %s",
+            exc,
+            exc_info=True,
+        )
+        return True, f"judge exception: {type(exc).__name__}"
+
+    if transport_failed or parse_failed:
+        logger.warning(
+            "goal judge %s, allowing completion: %s",
+            "transport failed" if transport_failed else "parse failed",
+            reason,
+        )
+        return True, reason
+    if verdict != "done":
+        return False, reason
+    return True, reason
+
+
 def gather_background_processes(task_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Return the live background-process snapshot for the goal judge.
 
