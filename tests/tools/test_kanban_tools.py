@@ -188,15 +188,17 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
         conn.close()
     monkeypatch.setenv("HERMES_KANBAN_TASK", goal_task_id)
 
-    # Mock the judge to reject the completion. The gate only runs when a
-    # judge is reachable, so force the availability probe True as well.
+    # Mock the judge to reject the completion.
     def mock_judge_goal(goal, last_response, *, timeout=30.0, subgoals=None):
         # Match the real judge_goal contract:
         # (verdict, reason, parse_failed, wait_directive, transport_failed)
         return "continue", "missing verification evidence", False, None, False
 
-    monkeypatch.setattr("tools.kanban_tools.judge_goal", mock_judge_goal)
-    monkeypatch.setattr("tools.kanban_tools._goal_judge_available", lambda: True)
+    monkeypatch.setattr("hermes_cli.goals.judge_goal", mock_judge_goal)
+    monkeypatch.setattr(
+        "agent.auxiliary_client.get_text_auxiliary_client",
+        lambda name: (object(), "judge-model"),
+    )
 
     # Attempt to complete should be rejected
     out = kt._handle_complete({"summary": "I did some stuff but not X"})
@@ -211,6 +213,54 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
     try:
         task = kb.get_task(conn2, goal_task_id)
         assert task.status == "running"  # Should still be running, not done
+    finally:
+        conn2.close()
+
+
+def test_complete_goal_mode_transport_failed_fails_open(monkeypatch, tmp_path):
+    """Configured-but-500 judge must not wedge goal_mode complete (t_39fc63a7)."""
+    from pathlib import Path as _Path
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        goal_task_id = kb.create_task(
+            conn, title="Service down: knowledge-api", assignee="test-worker",
+            body="Resolve the incident and complete with evidence.", goal_mode=True
+        )
+        kb.claim_task(conn, goal_task_id)
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", goal_task_id)
+
+    def mock_judge_goal(goal, last_response, *, timeout=30.0, subgoals=None):
+        return "continue", "judge error: InternalServerError", False, None, True
+
+    monkeypatch.setattr("hermes_cli.goals.judge_goal", mock_judge_goal)
+    monkeypatch.setattr(
+        "agent.auxiliary_client.get_text_auxiliary_client",
+        lambda name: (object(), "judge-model"),
+    )
+
+    out = kt._handle_complete({
+        "summary": "incident inc-test resolved; /health returns 200",
+    })
+    d = json.loads(out)
+    assert d.get("ok") is True, out
+
+    conn2 = kb.connect()
+    try:
+        assert kb.get_task(conn2, goal_task_id).status == "done"
     finally:
         conn2.close()
 
