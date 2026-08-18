@@ -97,6 +97,64 @@ class TestJudgeGoal:
         assert reason == "achieved"
 
 
+class TestEvaluateGoalCompletionGate:
+    """kanban_complete must fail-open on judge transport errors (t_39fc63a7)."""
+
+    def _patch_available(self, monkeypatch, available=True):
+        client = object() if available else None
+        model = "judge-model" if available else None
+        monkeypatch.setattr(
+            "agent.auxiliary_client.get_text_auxiliary_client",
+            lambda name: (client, model),
+        )
+
+    def test_transport_error_allows_completion(self, monkeypatch):
+        from hermes_cli import goals
+
+        self._patch_available(monkeypatch)
+        monkeypatch.setattr(
+            goals,
+            "judge_goal",
+            lambda **kw: ("continue", "judge error: InternalServerError", False, None, True),
+        )
+        allowed, reason = goals.evaluate_goal_completion_gate("goal", "resolved with evidence")
+        assert allowed is True
+        assert "InternalServerError" in reason
+
+    def test_parse_failure_allows_completion(self, monkeypatch):
+        from hermes_cli import goals
+
+        self._patch_available(monkeypatch)
+        monkeypatch.setattr(
+            goals,
+            "judge_goal",
+            lambda **kw: ("continue", "judge reply was not JSON", True, None, False),
+        )
+        allowed, reason = goals.evaluate_goal_completion_gate("goal", "resolved")
+        assert allowed is True
+
+    def test_real_continue_still_rejects(self, monkeypatch):
+        from hermes_cli import goals
+
+        self._patch_available(monkeypatch)
+        monkeypatch.setattr(
+            goals,
+            "judge_goal",
+            lambda **kw: ("continue", "missing verification evidence", False, None, False),
+        )
+        allowed, reason = goals.evaluate_goal_completion_gate("goal", "I did some stuff")
+        assert allowed is False
+        assert "missing verification evidence" in reason
+
+    def test_unavailable_judge_allows_completion(self, monkeypatch):
+        from hermes_cli import goals
+
+        self._patch_available(monkeypatch, available=False)
+        allowed, reason = goals.evaluate_goal_completion_gate("goal", "resolved")
+        assert allowed is True
+        assert "unavailable" in reason
+
+
 # ──────────────────────────────────────────────────────────────────────
 # GoalManager lifecycle + persistence
 # ──────────────────────────────────────────────────────────────────────

@@ -34,7 +34,7 @@ import os
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
-from hermes_cli.goals import judge_goal
+from hermes_cli.goals import evaluate_goal_completion_gate
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 
@@ -749,8 +749,10 @@ def _handle_complete(args: dict, **kw) -> str:
             # Goal-mode pre-completion judge gate (Issue #38367).
             # Prevent workers from bypassing the auxiliary judge by
             # calling kanban_complete before acceptance criteria are met.
-            # Only enforce when a judge is actually reachable — see
-            # _goal_judge_available for why an unavailable judge fails open.
+            # Fail-open when the judge is unconfigured or degraded
+            # (transport_failed / parse_failed) — a configured-but-500
+            # auxiliary (InternalServerError, GeminiAPIError) must not
+            # wedge every goal_mode worker.
             task = kb.get_task(conn, tid)
             rejection = _goal_mode_handoff_rejection(
                 task,
