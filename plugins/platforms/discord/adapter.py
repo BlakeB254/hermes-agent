@@ -1415,6 +1415,27 @@ class DiscordAdapter(BasePlatformAdapter):
             async def on_message_delete(message: DiscordMessage):
                 await adapter_self._on_platform_message_delete(message)
 
+            # CDX #approvals: REST-posted cdxapproval:* buttons (not discord.py Views).
+            # Load the handler from ~/.hermes/scripts so a Hermes update does not
+            # have to carry the jsonl writer. Last recorded click before this
+            # restore: 2026-05-16.
+            try:
+                import importlib.util
+                from pathlib import Path as _P
+                _hook = _P.home() / ".hermes/scripts/cdx_approval_discord_interactions.py"
+                if _hook.is_file():
+                    _spec = importlib.util.spec_from_file_location(
+                        "cdx_approval_discord_interactions", _hook,
+                    )
+                    if _spec and _spec.loader:
+                        _mod = importlib.util.module_from_spec(_spec)
+                        _spec.loader.exec_module(_mod)
+                        if hasattr(_mod, "attach"):
+                            _mod.attach(self._client)
+                            logger.info("[%s] CDX approval interaction hook attached", adapter_self.name)
+            except Exception:
+                logger.exception("[%s] CDX approval interaction hook failed to attach", adapter_self.name)
+
             @self._client.event
             async def on_thread_create(thread):
                 await adapter_self._on_platform_thread_create(thread)
