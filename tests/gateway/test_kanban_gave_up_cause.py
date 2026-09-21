@@ -9,7 +9,7 @@ events: only 3 were genuine spawn failures, while 277 were workers exiting
 rc=0 without calling kanban_complete because they could not reach a model.
 Operators spent days chasing a spawn bug that did not exist.
 """
-from gateway.kanban_watchers import _gave_up_cause
+from gateway.kanban_watchers_notifier import _gave_up_cause
 
 
 def test_protocol_violation_names_the_clean_exit_not_spawn():
