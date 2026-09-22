@@ -32,9 +32,10 @@ class FakeCLI:
         pass
 
     def chat(self, query, images=None):
-        # What hermes_cli/cli_chat_turn_mixin.py does in its `finally:` after every turn.
+        # What hermes_cli/cli_chat_turn_mixin.py does in its `finally:` after every turn
+        # (attribute renamed to _last_turn_result upstream in v0.21.4).
         self.chatted = True
-        self._last_run_result = self._result
+        self._last_turn_result = self._result
         return (self._result or {}).get("final_response", "")
 
 
@@ -47,14 +48,23 @@ def _isolate(monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
 
 
-def _run(result):
-    fake = FakeCLI(result)
+def _run(result, fake=None):
+    # v0.21.4: the -q path always exits via SystemExit, so a caller that needs to inspect the
+    # fake afterwards must own it — this helper cannot return through a raised exit.
+    fake = fake if fake is not None else FakeCLI(result)
     cli_mod._run_single_query_mode(fake, "do the thing", None, quiet=False, oneshot=False)
     return fake
 
 
-def test_a_successful_q_turn_returns_normally():
-    fake = _run({"final_response": "done", "failed": False})
+def test_a_successful_q_turn_exits_zero():
+    # v0.21.4 changed the contract: the -q path now ALWAYS exits explicitly via
+    # exit_single_query (it writes the kanban worker-exit trailer first), where it used to
+    # return on success. The carried guarantee is unchanged and now pinned harder: a
+    # successful turn must not be booked as a failure.
+    fake = FakeCLI({"final_response": "done", "failed": False})
+    with pytest.raises(SystemExit) as exc:
+        _run(None, fake=fake)
+    assert (exc.value.code or 0) == 0
     assert fake.chatted
 
 
@@ -80,6 +90,20 @@ def test_a_quota_wall_outside_a_kanban_worker_is_a_plain_failure(monkeypatch):
     assert exc.value.code == 1
 
 
-def test_a_turn_that_recorded_no_result_does_not_invent_a_failure():
-    fake = _run(None)
+def test_a_turn_with_no_result_is_a_failure_not_a_silent_success():
+    """v0.21.4 INVERTED the carried expectation here, deliberately, and we take upstream's.
+
+    This test used to assert that a turn recording no result exits 0 ("does not invent a
+    failure"). That made sense when _last_turn_result was only set on some paths, so None did
+    not imply the turn had not run. Upstream now sets it in _chat_settle_turn (and the carried
+    fix sets it again in the turn's finally), so a non-dict result means the turn NEVER RAN —
+    credentials or agent init failed. _single_query_exit_code documents that as exit 1.
+
+    Taking upstream is the safer direction: exiting 0 here would report success to the Kanban
+    dispatcher for a worker whose agent never started, and the card would be booked complete.
+    """
+    fake = FakeCLI(None)
+    with pytest.raises(SystemExit) as exc:
+        _run(None, fake=fake)
+    assert exc.value.code == 1
     assert fake.chatted
