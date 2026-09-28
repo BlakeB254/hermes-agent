@@ -46,6 +46,17 @@ def _isolate(monkeypatch):
     monkeypatch.setattr(cli_mod, "_collect_kanban_task_images", lambda images: [])
     monkeypatch.setattr(cli_mod, "_finalize_single_query", lambda cli: None)
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    # v0.21.5: _run_single_query_mode pins the CLI on the global plugin manager
+    # (get_plugin_manager()._cli_ref = cli, #67597). Restore it, or the FakeCLI leaks into
+    # later tests: execute_code then dispatches through it and returns status=error.
+    from hermes_cli.plugins import get_plugin_manager
+    _pm = get_plugin_manager()
+    monkeypatch.setattr(_pm, "_cli_ref", getattr(_pm, "_cli_ref", None), raising=False)
+    # It also sets os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1" in-process (#86878); left set,
+    # every later execute_code in the session is BLOCKED as unattended. setenv first so
+    # monkeypatch records the original (usually absent) value and restores it on undo.
+    monkeypatch.setenv("HERMES_SINGLE_QUERY_SESSION", "0")
+    monkeypatch.delenv("HERMES_SINGLE_QUERY_SESSION")
 
 
 def _run(result, fake=None):
