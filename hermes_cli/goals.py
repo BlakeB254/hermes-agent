@@ -996,6 +996,42 @@ def last_user_message_from_db(session_id: Optional[str]) -> Any:
         return ""
 
 
+def evaluate_goal_completion_gate(
+    goal: str, last_response: str, *, timeout: float = DEFAULT_JUDGE_TIMEOUT,
+) -> Tuple[bool, str]:
+    """Decide whether a goal_mode lifecycle handoff should proceed: ``(allowed, reason)``.
+
+    CDX carried helper (68756441f2, ported to the v2026.9.14 layout). Real ``continue`` /
+    ``wait`` / ``blocked`` verdicts still reject. Transport errors (``InternalServerError``,
+    auth/timeout/DNS) and unparseable judge replies fail **open**, so a degraded auxiliary
+    model cannot wedge every goal_mode worker. The two production gates —
+    ``tools.kanban_tools._goal_gate`` and ``hermes_cli.kanban._goal_mode_handoff_rejection`` —
+    apply the same rule inline because they also need the verdict for their guidance text;
+    this is that rule stated once, and what the tests pin.
+    """
+    try:
+        from agent.auxiliary_client import get_text_auxiliary_client
+
+        client, model = get_text_auxiliary_client("goal_judge")
+        if client is None or not model:
+            return True, "goal judge unavailable"
+    except Exception:
+        return True, "goal judge unavailable"
+
+    try:
+        verdict, reason, parse_failed, _wait, transport_failed = judge_goal(
+            goal=goal, last_response=last_response, timeout=timeout)
+    except Exception as exc:
+        logger.warning("goal judge check failed, allowing completion: %s", exc, exc_info=True)
+        return True, f"judge exception: {type(exc).__name__}"
+
+    if transport_failed or parse_failed:
+        logger.warning("goal judge %s, allowing completion: %s",
+                       "transport failed" if transport_failed else "parse failed", reason)
+        return True, reason
+    return verdict == "done", reason
+
+
 def gather_background_processes(task_id: Optional[str] = None, *, owner_task_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Fail-safe snapshot of RUNNING ``process_registry`` sessions for the judge; ``[]`` on any error
     so the loop degrades to its pre-wait-barrier behavior.
@@ -1635,6 +1671,13 @@ def run_kanban_goal_loop(
     last_response = first_response or ""
     turns_used = 1   # the first turn already consumed one unit of budget
     nudged_to_finalize = False
+    # CDX carried fix (75f209a68f, ported to the v2026.9.14 layout). Mirrors the guard
+    # GoalManager already applies to the INTERACTIVE loop. The kanban loop never had it, so
+    # an unreachable judge never returned "done", the loop spent every remaining turn
+    # re-asking a dead API, and the card was then blocked with "exhausted its turn budget
+    # (N/N)" — a message describing the symptom while hiding the cause. Observed 2026-08-06:
+    # the judge failed with PermissionDeniedError on every turn of a 40-turn budget.
+    consecutive_transport_failures = 0
 
     while True:
         try:
@@ -1662,9 +1705,29 @@ def run_kanban_goal_loop(
         finally:
             if affinity_token is not None:
                 reset_affinity_scope(affinity_token)
+        # CDX carried fix (goal-judge completion path): count consecutive transport failures so an
+        # unreachable judge stops the loop WITHOUT blocking the card. Dropping this turns a provider
+        # outage into sticky "exhausted its turn budget" cards a human must clear (90 of them, 2026-08-18).
+        consecutive_transport_failures = consecutive_transport_failures + 1 if _transport_failed else 0
         if verdict == "wait":
             verdict = "continue"
         _log(f"kanban goal loop: turn {turns_used}/{max_turns} verdict={verdict} reason={_truncate(reason, 120)}")
+
+        # The judge is unreachable, so no number of further turns can produce "done". Stop
+        # WITHOUT blocking: an unreachable judge is an infrastructure fault, not a bad card,
+        # and the dispatcher can retry the task once the provider recovers. Blocking here is
+        # what turned a provider outage into a pile of sticky "exhausted its turn budget"
+        # cards that each needed a human to clear.
+        if consecutive_transport_failures >= DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES:
+            _log(
+                f"kanban goal loop: judge unreachable {consecutive_transport_failures} turns in a "
+                f"row; stopping (task left for the dispatcher to retry)"
+            )
+            return _result(
+                "stopped",
+                f"goal judge unreachable {consecutive_transport_failures} turns in a row "
+                f"(auxiliary.goal_judge provider/key)",
+            )
 
         if verdict == "blocked":
             # Unachievable is NOT done: block the card with the judge's reason now instead of

@@ -374,6 +374,14 @@ class CLIChatTurnMixin:
                 "completed": False, "failed": True, "error": _summary,
             }
         finally:
+            # CDX carried fix (75f209a68f), re-applied onto the v0.21.4 layout: expose the
+            # turn's raw result so `hermes chat -q` can set a truthful exit code. chat()
+            # returns only the response string, so the -q path had no way to know the
+            # turn failed and always exited 0 — see hermes_cli/cli_single_query.py.
+            # Upstream renamed this to _last_turn_result and sets it in _chat_settle_turn;
+            # keep the assignment HERE too, in the finally, so an exception that skips
+            # settle still leaves a truthful result for the exit code.
+            self._last_turn_result = getattr(turn, "result", None)
             if _one_turn_model_restore:
                 self._restore_model_runtime_snapshot(_one_turn_model_restore)
             # Credit notices paint cleanly above the prompt here, not behind streamed output.

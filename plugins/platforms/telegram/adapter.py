@@ -4704,6 +4704,29 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         self._accept_update()
         data = query.data
+        # --- CDX research ingest (ri:a:AID / ri:r:AID) — carried hook (68756441f2), ported to the
+        # v2026.9.14 dispatch-table layout. The handler lives OUTSIDE this repo, in
+        # ~/.hermes/scripts, so the approval buttons posted by cdx-platform's research pipeline
+        # survive Hermes updates; this is only the prefix route to it.
+        if data.startswith("ri:"):
+            try:
+                import importlib.util
+                from pathlib import Path as _P
+
+                _hook = _P.home() / ".hermes" / "scripts" / "cdx_telegram_research_callback.py"
+                _spec = importlib.util.spec_from_file_location("cdx_tg_ri", _hook)
+                if _spec is None or _spec.loader is None:
+                    raise RuntimeError("cdx telegram research hook missing")
+                _mod = importlib.util.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+                await _mod.handle_research_ingest_callback(self, query, data)
+            except Exception as exc:
+                logger.error("CDX research ingest callback failed: %s", exc)
+                try:
+                    await query.answer(text="Research approval failed.")
+                except Exception:
+                    pass
+            return
         cb = self._callback_ctx(query)
         # Model picker / generic choice picker (/reasoning, /fast) need a chat id.
         for prefixes, handler in (

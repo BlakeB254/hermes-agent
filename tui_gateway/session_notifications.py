@@ -317,11 +317,20 @@ def _kb_timed_out(task, payload: dict, title: str) -> str:
     return " timed out (max_runtime=0s); will retry"
 
 
+def _kb_gave_up_cause(payload: dict) -> str:
+    # Imported lazily, as the pre-refactor code did: the TUI gateway must not pull the
+    # messaging gateway's watcher stack in at import time.
+    from gateway.kanban_watchers_notifier import _gave_up_cause
+
+    return _gave_up_cause(payload)
+
+
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
 _KANBAN_EVENT_FORMATTERS = {
     "completed": ("✔", _kb_completed),
     "blocked": ("⏸", lambda t, p, title: " blocked" + (f": {str(p.get('reason'))[:160]}" if p.get("reason") else "")),
-    "gave_up": ("✖", lambda t, p, title: " gave up after repeated spawn failures"
+    # CDX carried fix (75f209a68f): report the breaker's real trigger, not "spawn failures" for all.
+    "gave_up": ("✖", lambda t, p, title: " " + _kb_gave_up_cause(p)
                 + (f"\n{str(p.get('error'))[:200]}" if p.get("error") else "")),
     "crashed": ("✖", lambda t, p, title: " worker crashed (pid gone); dispatcher will retry"),
     "timed_out": ("⏱", _kb_timed_out),

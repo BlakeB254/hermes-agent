@@ -413,6 +413,49 @@ def _fmt_changes_requested(ev, n) -> tuple:
     return msg, None, reason_text
 
 
+def _gave_up_reason(payload: Optional[dict]) -> str:
+    """The trigger the payload actually carries, as a bare phrase (empty when it carries none).
+
+    CDX carried fix (75f209a68f), re-applied onto the v0.21.4 formatter layout.
+    """
+    payload = payload or {}
+    trigger = str(payload.get("trigger_outcome") or "")
+    if payload.get("protocol_violations"):
+        return (
+            "the worker kept exiting cleanly without calling "
+            "kanban_complete/kanban_block (usually it could not reach a model)"
+        )
+    if trigger == "timed_out":
+        return "repeated timeouts"
+    if trigger == "crashed":
+        return "repeated worker crashes"
+    if trigger == "spawn_failed":
+        return "repeated spawn failures"
+    if trigger:
+        return f"repeated failures ({trigger})"
+    return ""
+
+
+def _gave_up_cause(payload: Optional[dict]) -> str:
+    """Describe why the retry breaker tripped, in the operator's words.
+
+    CDX carried fix (75f209a68f, ported to the v2026.9.14 layout). ``gave_up`` is emitted
+    by ONE breaker shared by the spawn-failure, timeout, crash and clean-exit
+    protocol-violation paths, but the notification hardcodes "gave up after repeated spawn
+    failures" for all of them. During the 2026-08-06 provider outage that was wrong for
+    305 of 308 events — only 3 were genuine spawn failures, while 277 were workers exiting
+    rc=0 without calling ``kanban_complete`` because they could not reach a model at all.
+    Operators chased a spawn bug that did not exist. The trigger is already in the payload;
+    report it, and never assert a cause it does not carry.
+    """
+    reason = _gave_up_reason(payload)
+    if not reason:
+        return "gave up after repeated failures"
+    if reason.startswith("the worker"):
+        return "gave up \u2014 " + reason
+    return "gave up after " + reason
+
+
 def _fmt_block_loop_detected(ev, n) -> tuple:
     """Re-blocked for the same cause past the limit and routed to `triage`.
 
@@ -438,6 +481,12 @@ def _fmt_gave_up(ev, n) -> tuple:
     # (spawn failure, crash, or timeout alike): it is now Blocked and waiting for a human.
     failures = _payload(ev, "failures")
     count = f"it failed {int(failures)} times in a row" if failures else "it kept failing"
+    # CDX carried fix (75f209a68f): name the trigger the payload carries. A bare count hides the
+    # protocol-violation case \u2014 worker exits rc=0 without calling kanban_complete \u2014 which was
+    # 277 of 308 events in the 2026-08-06 provider outage, when only 3 were real spawn failures.
+    _reason = _gave_up_reason(getattr(ev, "payload", None))
+    if _reason:
+        count = f"{count} ({_reason})" if failures else f"it gave up \u2014 {_reason}"
     last = _clip(ev, "error", " (last: {})", 160)
     return (
         f"⛔ {n.head} is now blocked: {count}{last}. Fix the cause, then `hermes kanban unblock "

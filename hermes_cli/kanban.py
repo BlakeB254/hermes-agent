@@ -856,12 +856,24 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
         from agent.portal_tags import get_affinity_scope, reset_affinity_scope, set_affinity_scope
         affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{task.id}")
         try:
-            verdict, reason, _, _, transport_failed = judge_goal(
+            verdict, reason, parse_failed, _, transport_failed = judge_goal(
                 goal=f"{task.title}\n\n{task.body or ''}".strip(),
                 last_response=evidence.strip())
         finally:
             if affinity_token is not None:
                 reset_affinity_scope(affinity_token)
+        # CDX carried fix (68756441f2, re-applied onto the v0.21.4 affinity-scope layout).
+        # judge_goal fails OPEN to "continue" on a transport error or an unparseable reply, which is
+        # indistinguishable here from a real "not done yet" — so a configured-but-500 auxiliary
+        # (InternalServerError, timeout) read as a content rejection and wedged every goal_mode
+        # worker. A degraded judge is not a verdict.
+        if transport_failed or parse_failed:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "goal judge %s, allowing lifecycle handoff: %s",
+                "transport failed" if transport_failed else "parse failed", reason)
+            return ("done", None)
     except Exception as judge_exc:
         import logging as _logging
 

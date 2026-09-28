@@ -356,6 +356,58 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
         conn2.close()
 
 
+@pytest.mark.parametrize("flags", [(False, True), (True, False)], ids=["transport_failed", "parse_failed"])
+def test_complete_goal_mode_allows_completion_when_the_judge_is_degraded(monkeypatch, tmp_path, flags):
+    """CDX carried fix (68756441f2). ``judge_goal`` does not raise on a transport error or an
+    unparseable reply: it fails open to ``"continue"`` and sets a flag. A gate that reads only the
+    verdict turns ``judge error: InternalServerError`` into a content rejection, so a
+    configured-but-500 auxiliary wedges every goal_mode worker at ``kanban_complete``. A degraded
+    judge is not a verdict — completion must go through."""
+    from pathlib import Path as _Path
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    parse_failed, transport_failed = flags
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="goal-mode-degraded-judge", assignee="test-worker",
+                             body="Must achieve X with verified evidence.", goal_mode=True)
+        kb.claim_task(conn, tid)
+        # v0.21.4 added a run-ownership gate: an unbound worker cannot mutate its card. A real
+        # dispatcher always pins the run id, so simulate that or the call is refused before the
+        # judge logic under test is ever reached.
+        _run_id = kb.get_task(conn, tid).current_run_id
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(_run_id))
+
+    def degraded_judge(goal, last_response, *, timeout=30.0, subgoals=None):
+        return "continue", "judge error: InternalServerError", parse_failed, None, transport_failed
+
+    monkeypatch.setattr("tools.kanban_tools.judge_goal", degraded_judge)
+    monkeypatch.setattr("tools.kanban_tools._goal_judge_available", lambda: True)
+
+    d = json.loads(kt._handle_complete({"summary": "Did X; evidence attached."}))
+
+    assert "error" not in d, d
+    conn2 = kbc.connect()
+    try:
+        assert kb.get_task(conn2, tid).status != "running"
+    finally:
+        conn2.close()
+
+
 def test_block_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_block({"reason": "need clarification"})
