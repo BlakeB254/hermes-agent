@@ -141,16 +141,15 @@ def _pid_is_sentinel_owner(pid: Any, start_time: Any, create_time: Any) -> bool:
 
 
 def _suspected_oom(mem: Dict[str, Any]) -> bool:
-    """Heuristic only (classification stays with the reader); thresholds are
-    memory_status' "critical" tier so a live warning and a post-mortem verdict agree."""
-    from gateway.memory_status import _CRITICAL_AVAILABLE_FRACTION, _CRITICAL_AVAILABLE_KIB
+    """Heuristic only (classification stays with the reader): the last heartbeat was already in
+    memory_status' "critical" tier, so a live warning and a post-mortem verdict agree.
 
-    total, avail = mem.get("mem_total_kib"), mem.get("mem_available_kib")
-    if not isinstance(avail, int):
-        return False
-    return avail < _CRITICAL_AVAILABLE_KIB or (
-        isinstance(total, int) and total > 0 and avail / total < _CRITICAL_AVAILABLE_FRACTION
-    )
+    Calls ``classify_pressure`` itself rather than re-reading its constants, so a host's absolute
+    floors (HERMES_MEMORY_*_KIB / HERMES_MEMORY_FRACTION_FLOORS) move both together. A missing
+    sample is ``unknown``, never ``critical``, so it is not flagged."""
+    from gateway.memory_status import classify_pressure
+
+    return classify_pressure(mem.get("mem_available_kib"), mem.get("mem_total_kib")) == "critical"
 
 
 def detect_unclean_exit(home: Optional[Path] = None) -> Optional[Dict[str, Any]]:

@@ -182,3 +182,59 @@ class TestCollectMemoryStatus:
         status = collect_memory_status(tmp_path, now=_NOW)
         assert status["pressure"] == "unknown"
         assert status["gateway_rss_mb"] is None
+
+
+
+# --- CDX 2026-10-16: absolute floors for a host with one resident model ------------------------
+
+_GIB = 1024 * 1024
+
+
+def test_default_floors_are_unchanged(monkeypatch):
+    from gateway.memory_status import classify_pressure
+    for k in ("HERMES_MEMORY_CRITICAL_KIB", "HERMES_MEMORY_ELEVATED_KIB", "HERMES_MEMORY_FRACTION_FLOORS"):
+        monkeypatch.delenv(k, raising=False)
+    assert classify_pressure(4 * _GIB, 122 * _GIB) == "critical"   # < 5% of MemTotal
+    assert classify_pressure(10 * _GIB, 122 * _GIB) == "elevated"  # < 15%
+    assert classify_pressure(30 * _GIB, 122 * _GIB) == "ok"
+
+
+def test_a_resident_model_host_sets_absolute_floors(monkeypatch):
+    from gateway.memory_status import classify_pressure
+    monkeypatch.setenv("HERMES_MEMORY_FRACTION_FLOORS", "0")
+    monkeypatch.setenv("HERMES_MEMORY_CRITICAL_KIB", str(int(1.5 * _GIB)))
+    monkeypatch.setenv("HERMES_MEMORY_ELEVATED_KIB", str(3 * _GIB))
+    assert classify_pressure(4 * _GIB, 122 * _GIB) == "ok"         # the Spark's healthy steady state
+    assert classify_pressure(int(2.5 * _GIB), 122 * _GIB) == "elevated"
+    assert classify_pressure(1 * _GIB, 122 * _GIB) == "critical"
+    assert classify_pressure(None, 122 * _GIB) == "unknown"        # unreadable never reads as fine
+
+
+def test_a_bad_or_negative_override_falls_back_to_the_default_floor(monkeypatch):
+    """With the percent tiers off, only the absolute floor decides, so the fallback is visible:
+    "lots" or -1 must mean the 64 MiB default, not 0 (review of #3)."""
+    from gateway.memory_status import classify_pressure
+    monkeypatch.setenv("HERMES_MEMORY_FRACTION_FLOORS", "0")
+    monkeypatch.delenv("HERMES_MEMORY_ELEVATED_KIB", raising=False)
+    for bad in ("lots", "-1"):
+        monkeypatch.setenv("HERMES_MEMORY_CRITICAL_KIB", bad)
+        assert classify_pressure(32 * 1024, 122 * _GIB) == "critical"      # under the 64 MiB default
+        assert classify_pressure(100 * 1024, 122 * _GIB) != "critical"     # above it
+
+
+def test_the_oom_post_mortem_follows_the_same_floors(monkeypatch):
+    """Kanban, /api/status and the lifecycle OOM heuristic must agree (review of #3)."""
+    from gateway.lifecycle_ledger import _suspected_oom
+    from gateway.memory_status import classify_pressure
+    healthy = {"mem_available_kib": 4 * _GIB, "mem_total_kib": 122 * _GIB}
+    for k in ("HERMES_MEMORY_CRITICAL_KIB", "HERMES_MEMORY_ELEVATED_KIB", "HERMES_MEMORY_FRACTION_FLOORS"):
+        monkeypatch.delenv(k, raising=False)
+    assert classify_pressure(healthy["mem_available_kib"], healthy["mem_total_kib"]) == "critical"
+    assert _suspected_oom(healthy) is True                                # defaults: both say critical
+    monkeypatch.setenv("HERMES_MEMORY_FRACTION_FLOORS", "0")
+    monkeypatch.setenv("HERMES_MEMORY_CRITICAL_KIB", str(int(1.5 * _GIB)))
+    monkeypatch.setenv("HERMES_MEMORY_ELEVATED_KIB", str(3 * _GIB))
+    assert classify_pressure(healthy["mem_available_kib"], healthy["mem_total_kib"]) == "ok"
+    assert _suspected_oom(healthy) is False                               # the Spark env: both say fine
+    assert _suspected_oom({"mem_available_kib": 1 * _GIB, "mem_total_kib": 122 * _GIB}) is True
+    assert _suspected_oom({"mem_total_kib": 122 * _GIB}) is False         # missing sample: not flagged
