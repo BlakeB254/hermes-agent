@@ -25,6 +25,34 @@ _PRESSURE_TIERS = (  # order-sensitive: worst first
     ("elevated", _ELEVATED_AVAILABLE_KIB, _ELEVATED_AVAILABLE_FRACTION),
 )
 
+# CDX 2026-10-16: on a unified-memory host that keeps one large model resident (DGX Spark: the
+# engine reserves ~90 GiB of 122 by design, so MemAvailable sits at ~4 GiB when HEALTHY), a
+# percent-of-MemTotal floor reads "critical" forever: 4,780 critical kanban ticks in 24 h, no
+# workers spawned on a healthy box. The host sets absolute floors instead. Defaults unchanged.
+#   HERMES_MEMORY_CRITICAL_KIB / HERMES_MEMORY_ELEVATED_KIB   absolute MemAvailable floors (KiB)
+#   HERMES_MEMORY_FRACTION_FLOORS=0                           drop the percent-of-MemTotal tiers
+def _env_kib(name: str, default: int) -> int:
+    import os
+
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = int(raw) if raw else default
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
+def _pressure_tiers() -> tuple:
+    import os
+
+    fractions = os.environ.get("HERMES_MEMORY_FRACTION_FLOORS", "1").strip().lower() not in ("0", "false", "no", "off")
+    return (
+        ("critical", _env_kib("HERMES_MEMORY_CRITICAL_KIB", _CRITICAL_AVAILABLE_KIB),
+         _CRITICAL_AVAILABLE_FRACTION if fractions else 0.0),
+        ("elevated", _env_kib("HERMES_MEMORY_ELEVATED_KIB", _ELEVATED_AVAILABLE_KIB),
+         _ELEVATED_AVAILABLE_FRACTION if fractions else 0.0),
+    )
+
 # Writer cadence is 30s; 150s tolerates a briefly stalled loop without letting
 # a long-dead gateway's last sample pose as current.
 _HEARTBEAT_FRESH_TTL_S = 150.0
@@ -54,7 +82,7 @@ def classify_pressure(available_kib: Any, total_kib: Any) -> str:
     if available is None:
         return "unknown"
     fraction = available / total if total else None
-    for level, kib_floor, frac_floor in _PRESSURE_TIERS:
+    for level, kib_floor, frac_floor in _pressure_tiers():
         if available < kib_floor or (fraction is not None and fraction < frac_floor):
             return level
     return "ok"
