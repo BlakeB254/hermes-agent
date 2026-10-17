@@ -1019,6 +1019,42 @@ def last_user_message_from_db(session_id: Optional[str]) -> Any:
         return ""
 
 
+def evaluate_goal_completion_gate(
+    goal: str, last_response: str, *, timeout: float = DEFAULT_JUDGE_TIMEOUT,
+) -> tuple[bool, str]:
+    """Decide whether a goal_mode lifecycle handoff should proceed: ``(allowed, reason)``.
+
+    CDX carried helper (68756441f2, ported to the v2026.9.14 layout). Real ``continue`` /
+    ``wait`` / ``blocked`` verdicts still reject. Transport errors (``InternalServerError``,
+    auth/timeout/DNS) and unparseable judge replies fail **open**, so a degraded auxiliary
+    model cannot wedge every goal_mode worker. The two production gates —
+    ``tools.kanban_tools._goal_gate`` and ``hermes_cli.kanban._goal_mode_handoff_rejection`` —
+    apply the same rule inline because they also need the verdict for their guidance text;
+    this is that rule stated once, and what the tests pin.
+    """
+    try:
+        from agent.auxiliary_client import get_text_auxiliary_client
+
+        client, model = get_text_auxiliary_client("goal_judge")
+        if client is None or not model:
+            return True, "goal judge unavailable"
+    except Exception:
+        return True, "goal judge unavailable"
+
+    try:
+        verdict, reason, parse_failed, _wait, transport_failed = judge_goal(
+            goal=goal, last_response=last_response, timeout=timeout)
+    except Exception as exc:
+        logger.warning("goal judge check failed, allowing completion: %s", exc, exc_info=True)
+        return True, f"judge exception: {type(exc).__name__}"
+
+    if transport_failed or parse_failed:
+        logger.warning("goal judge %s, allowing completion: %s",
+                       "transport failed" if transport_failed else "parse failed", reason)
+        return True, reason
+    return verdict == "done", reason
+
+
 def gather_background_processes(task_id: Optional[str] = None, *, owner_task_id: Optional[str] = None) -> list[dict[str, Any]]:
     """Fail-safe snapshot of RUNNING ``process_registry`` sessions for the judge; ``[]`` on any error
     so the loop degrades to its pre-wait-barrier behavior.
