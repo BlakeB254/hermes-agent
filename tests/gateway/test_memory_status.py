@@ -182,3 +182,36 @@ class TestCollectMemoryStatus:
         status = collect_memory_status(tmp_path, now=_NOW)
         assert status["pressure"] == "unknown"
         assert status["gateway_rss_mb"] is None
+
+
+
+# --- CDX 2026-10-16: absolute floors for a host with one resident model ------------------------
+
+_GIB = 1024 * 1024
+
+
+def test_default_floors_are_unchanged(monkeypatch):
+    from gateway.memory_status import classify_pressure
+    for k in ("HERMES_MEMORY_CRITICAL_KIB", "HERMES_MEMORY_ELEVATED_KIB", "HERMES_MEMORY_FRACTION_FLOORS"):
+        monkeypatch.delenv(k, raising=False)
+    assert classify_pressure(4 * _GIB, 122 * _GIB) == "critical"   # < 5% of MemTotal
+    assert classify_pressure(10 * _GIB, 122 * _GIB) == "elevated"  # < 15%
+    assert classify_pressure(30 * _GIB, 122 * _GIB) == "ok"
+
+
+def test_a_resident_model_host_sets_absolute_floors(monkeypatch):
+    from gateway.memory_status import classify_pressure
+    monkeypatch.setenv("HERMES_MEMORY_FRACTION_FLOORS", "0")
+    monkeypatch.setenv("HERMES_MEMORY_CRITICAL_KIB", str(int(1.5 * _GIB)))
+    monkeypatch.setenv("HERMES_MEMORY_ELEVATED_KIB", str(3 * _GIB))
+    assert classify_pressure(4 * _GIB, 122 * _GIB) == "ok"         # the Spark's healthy steady state
+    assert classify_pressure(int(2.5 * _GIB), 122 * _GIB) == "elevated"
+    assert classify_pressure(1 * _GIB, 122 * _GIB) == "critical"
+    assert classify_pressure(None, 122 * _GIB) == "unknown"        # unreadable never reads as fine
+
+
+def test_a_bad_override_falls_back_to_the_default(monkeypatch):
+    from gateway.memory_status import classify_pressure
+    monkeypatch.setenv("HERMES_MEMORY_CRITICAL_KIB", "lots")
+    monkeypatch.delenv("HERMES_MEMORY_FRACTION_FLOORS", raising=False)
+    assert classify_pressure(4 * _GIB, 122 * _GIB) == "critical"
