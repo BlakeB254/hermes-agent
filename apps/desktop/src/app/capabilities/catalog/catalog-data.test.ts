@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { fetchCatalog, parseCatalog } from './catalog-data'
+import { fetchCatalog, parseCatalog, prefetchCatalogWhenIdle } from './catalog-data'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -100,6 +100,33 @@ describe('public catalog data', () => {
       })
       expect(entry?.search).toContain(row.capabilities.providesTools[0])
     })
+  })
+
+  it('does not download the skills snapshot on a phone browser', async () => {
+    vi.stubGlobal('requestIdleCallback', undefined)
+    vi.stubGlobal('matchMedia', () => ({ matches: true }))
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+
+    expect(await fetchCatalog('skills')).toEqual([])
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('still downloads plugins on a phone browser', async () => {
+    vi.stubGlobal('requestIdleCallback', undefined)
+    const rows = [{ name: 'sheets', source: 'official', tier: 'official' }]
+    const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => rows })
+    vi.stubGlobal('fetch', fetch)
+
+    expect(await fetchCatalog('plugins')).toEqual(parseCatalog('plugins', rows))
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('warms a catalog without requestIdleCallback', () => {
+    vi.stubGlobal('requestIdleCallback', undefined)
+    vi.stubGlobal('cancelIdleCallback', undefined)
+
+    expect(() => prefetchCatalogWhenIdle('plugins')()).not.toThrow()
   })
 
   it.each(['skills', 'plugins'] as const)('fetches only the published %s snapshot and parses it', async kind => {

@@ -59,7 +59,35 @@ const IMAGE_HOSTS = new Set(['raw.githubusercontent.com', 'github.com'])
 
 // URL.parse, not `new URL` in try/catch: most skill rows carry no repo or docs
 // URL, and 200k thrown TypeErrors cost ~0.7s of main thread per catalog load.
-const parseUrl = (value: unknown) => URL.parse(text(value))
+// Safari before 17.4 has no URL.parse; the fallback runs only there.
+const parseUrl = (value: unknown) => {
+  const raw = text(value)
+
+  if (typeof URL.parse === 'function') {
+    return URL.parse(raw)
+  }
+
+  if (!raw) {
+    return null
+  }
+
+  try {
+    return new URL(raw)
+  } catch {
+    return null
+  }
+}
+
+/** The public skills snapshot is about 66MB. iPhone Safari leaves
+ *  requestIdleCallback off, and parsing that file closes the Capabilities tab.
+ *  A coarse pointer (phone, tablet) gets the same skip. Plugins stay. */
+function skillsCatalogFits(): boolean {
+  if (typeof requestIdleCallback !== 'function') {
+    return false
+  }
+
+  return typeof matchMedia !== 'function' || !matchMedia('(pointer: coarse)').matches
+}
 
 /** Mirrors scripts/validate_plugin_catalog.py: https on a GitHub host, else no image. */
 export function catalogImageUrl(value: unknown): string | null {
@@ -205,6 +233,10 @@ export function parseCatalog(kind: CatalogKind, data: unknown): CatalogEntry[] {
 }
 
 export async function fetchCatalog(kind: CatalogKind): Promise<CatalogEntry[]> {
+  if (kind === 'skills' && !skillsCatalogFits()) {
+    return []
+  }
+
   // Bound inactivity, not total transfer time: a large skills snapshot can
   // take minutes on a healthy slow connection. Headers and each body chunk
   // get the same deadline; an actually stalled download still terminates.
@@ -297,9 +329,19 @@ export function useCatalog(kind: CatalogKind) {
   })
 }
 
-/** Warm a catalog while the browser is idle so switching tabs doesn't pay the fetch + parse. */
+/** Warm a catalog while the browser is idle so switching tabs doesn't pay the fetch + parse.
+ *  iPhone Safari has no requestIdleCallback (it stays behind a feature flag). Calling it
+ *  threw and the Capabilities page never mounted. */
 export function prefetchCatalogWhenIdle(kind: CatalogKind) {
-  const id = requestIdleCallback(() => void queryClient.prefetchQuery(catalogQuery(kind)), { timeout: 5_000 })
+  const warm = () => void queryClient.prefetchQuery(catalogQuery(kind))
+
+  if (typeof requestIdleCallback !== 'function') {
+    const id = setTimeout(warm, 1)
+
+    return () => clearTimeout(id)
+  }
+
+  const id = requestIdleCallback(warm, { timeout: 5_000 })
 
   return () => cancelIdleCallback(id)
 }
