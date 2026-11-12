@@ -875,6 +875,30 @@ class TestUpdateCheckEndpoint:
         assert refused["error"] == "dashboard_update_managed_externally"
         assert refused["update_command"] == ""
 
+    def test_external_install_is_not_reported_as_unreachable(self, monkeypatch):
+        """An install the checker refuses (updateMechanism external) is not a network failure.
+
+        The desktop About tab turns can_apply + behind=null into "couldn't reach
+        the update server". The agent-plane gateway is that shape: the checker
+        returns supported=false and a real message, and this route used to
+        discard both.
+        """
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda *a, **k: "git")
+        monkeypatch.setattr("hermes_cli.source_check.check_for_updates", lambda **kw: {
+            "supported": False,
+            "behind": None,
+            "reason": "update-root-steward-owned-git-tree",
+            "message": "This installation is managed by its install method; use its updater.",
+        })
+
+        body = self.client.get("/api/hermes/update/check").json()
+        assert body["can_apply"] is False
+        assert body["update_available"] is False
+        assert body["behind"] is None
+        assert body["update_command"] == ""
+        assert body["message"] == "This installation is managed by its install method; use its updater."
+        assert "reach" not in body["message"].lower()
+
 
 class TestDebugShareEndpoint:
     """POST /api/ops/debug-share returns the paste URLs synchronously so the
