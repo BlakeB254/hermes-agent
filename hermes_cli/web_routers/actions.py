@@ -339,10 +339,23 @@ async def check_hermes_update(force: bool = False, profile: Optional[str] = None
     except Exception:
         _log.exception("Update check failed")
         behind = None
+        status = {}
+
+    # supported=false means this install cannot update itself (an external
+    # stamp, a commit build the checker caught, or no git checkout). That is
+    # not a failed request. Leaving can_apply true and replacing the checker's
+    # message with "couldn't reach" made About report a dead update server.
+    if status.get("supported") is False:
+        payload["can_apply"] = False
+        payload["behind"] = None
+        payload["update_available"] = False
+        payload["update_command"] = ""
+        payload["message"] = status.get("message") or "This installation is updated outside the app."
+        return payload
 
     payload["behind"] = behind
     if behind is None:
-        payload["message"] = "Couldn't reach the update source — try again later."
+        payload["message"] = status.get("message") or "Couldn't reach the update source — try again later."
     elif behind == 0 and status.get("held"):
         version = status.get("sourceVersion")
         payload.update(held=status["held"], source_version=version,
